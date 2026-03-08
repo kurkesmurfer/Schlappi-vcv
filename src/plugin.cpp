@@ -1,10 +1,18 @@
 #include "plugin.hpp"
 
 
+#ifdef METAMODULE_BUILTIN
+extern Plugin* pluginInstance;
+#else
 Plugin* pluginInstance;
+#endif
 
 
+#ifdef METAMODULE_BUILTIN
+void init_schlappiengineering(Plugin* p) {
+#else
 void init(Plugin* p) {
+#endif
 	pluginInstance = p;
 
 	// Add modules here
