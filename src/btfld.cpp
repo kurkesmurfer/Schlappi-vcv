@@ -7,7 +7,11 @@
 
 #define NIBBLE 4
 #define BTFLD_UPSAMPLE_RATE 8
+#ifdef METAMODULE
+#define BTFLD_UPSAMPLE_QUALITY 4
+#else
 #define BTFLD_UPSAMPLE_QUALITY 12
+#endif
 
 struct ACCouplingFilter {
     ACCouplingFilter() : xPrev(0), yPrev(0), scalar(0) {}
@@ -27,7 +31,7 @@ public:
 };
 
 struct BitCalculator {
-    int stepSize;
+    int shiftAmount;
     int delayBeforeGoingHigh = BTFLD_UPSAMPLE_RATE * 1.5f;
     int counter;
     int lastOddValue;
@@ -53,7 +57,7 @@ struct BitCalculator {
     }
 
     float process(float input) {
-        if (oddTracker(static_cast<int>(input) / stepSize)) {
+        if (oddTracker(static_cast<int>(input) >> shiftAmount)) {
             return static_cast<float>(1.f);
         }
         return 0.f;
@@ -118,6 +122,8 @@ struct Btfld : Module {
     std::array<BitCalculator, NIBBLE> bitCalculators;
 
     float upsamplerGain, downsamplerGain;
+    int lightDivider = 0;
+    static constexpr int LIGHT_DIVIDER = 256;
 
 	Btfld() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -149,10 +155,10 @@ struct Btfld : Module {
         }
         downsamplerGain = 1.f / kernelSum;
 
-        bitCalculators[0].stepSize = 1;
-        bitCalculators[1].stepSize = 2;
-        bitCalculators[2].stepSize = 4;
-        bitCalculators[3].stepSize = 8;
+        bitCalculators[0].shiftAmount = 0;
+        bitCalculators[1].shiftAmount = 1;
+        bitCalculators[2].shiftAmount = 2;
+        bitCalculators[3].shiftAmount = 3;
     }
 
     void onSampleRateChange(const SampleRateChangeEvent& e) override {
@@ -174,25 +180,33 @@ struct Btfld : Module {
     }
 
     void process(const ProcessArgs& args) override {
+        const bool updateLights = (++lightDivider >= LIGHT_DIVIDER);
+        if (updateLights) lightDivider = 0;
+        const float lightDeltaTime = args.sampleTime * LIGHT_DIVIDER;
+
         auto cvInput = inputs[CV_INPUT].isConnected() ? inputs[CV_INPUT].getVoltage() : feedback;
         auto gain = params[GAIN_PARAM].getValue() + params[CV_PARAM].getValue() * cvInput * 0.1f;
 
         cvUpsampler.process(gain * upsamplerGain, upsampledCV.data());
 
-        setPosNegLight(CV_INDICATOR_LIGHT, params[CV_PARAM].getValue() * cvInput, args.sampleTime);
+        if (updateLights) setPosNegLight(CV_INDICATOR_LIGHT, params[CV_PARAM].getValue() * cvInput, lightDeltaTime);
 
 
         auto inputSignal = inputs[INPUT_INPUT].getVoltage();
         auto bipolar = params[RANGE_PARAM].getValue() > 0.5f;
-        setPosNegLight(INPUT_INDICATOR_LIGHT, inputSignal, args.sampleTime);
+        if (updateLights) setPosNegLight(INPUT_INDICATOR_LIGHT, inputSignal, lightDeltaTime);
 
 
         inputUpsampler.process(inputSignal * upsamplerGain, upsampledInput.data());
 
         auto inject = inputs[INJECT_INPUT].getVoltage();
-        setPosNegLight(INJECT_INDICATOR_LIGHT, inject, args.sampleTime);
+        if (updateLights) setPosNegLight(INJECT_INDICATOR_LIGHT, inject, lightDeltaTime);
 
-        injectUpsampler.process(inject * upsamplerGain, upsampledInject.data());
+        if (inputs[INJECT_INPUT].isConnected()) {
+            injectUpsampler.process(inject * upsamplerGain, upsampledInject.data());
+        } else {
+            upsampledInject.fill(0.f);
+        }
 
         for (auto ss = 0; ss < BTFLD_UPSAMPLE_RATE; ++ss) {
             upsampledInput[ss] *= upsampledCV[ss];
@@ -222,24 +236,26 @@ struct Btfld : Module {
 
         for (auto i = 0; i < NIBBLE; ++i) {
             outputs[BIT_OUTPUT + i].setVoltage(bits[i] * 10.f - (bipolar ? 5.f : 0.f));
-            lights[BIT_INDICATOR_LIGHT + i].setBrightnessSmooth(bits[i], args.sampleTime);
+            if (updateLights) lights[BIT_INDICATOR_LIGHT + i].setBrightnessSmooth(bits[i], lightDeltaTime);
         }
 
         float steps = stepDownsampler.process(upsampledStepOut.data()) * downsamplerGain;
         float saw = sawDownsampler.process(upsampledSaw.data()) * downsamplerGain;
 
-        for (int l = 0; l < 8; ++l) {
-            // each light covers 2 steps
-            auto brightness = 0.f;
-            if (bipolar && l < 4) {
-                // if bipolar, invert the lower half of the lights to have a "measuring from the midpoint" effect
-                brightness += l * 2 > steps ? 0.5f : 0.f;
-                brightness += l * 2 + 1 > steps ? 0.5f : 0.f;
-            } else {
-                brightness += l * 2 <= steps ? 0.5f : 0.f;
-                brightness += l * 2 + 1 <= steps ? 0.5f : 0.f;
+        if (updateLights) {
+            for (int l = 0; l < 8; ++l) {
+                // each light covers 2 steps
+                auto brightness = 0.f;
+                if (bipolar && l < 4) {
+                    // if bipolar, invert the lower half of the lights to have a "measuring from the midpoint" effect
+                    brightness += l * 2 > steps ? 0.5f : 0.f;
+                    brightness += l * 2 + 1 > steps ? 0.5f : 0.f;
+                } else {
+                    brightness += l * 2 <= steps ? 0.5f : 0.f;
+                    brightness += l * 2 + 1 <= steps ? 0.5f : 0.f;
+                }
+                lights[LEVEL_LIGHT + l].setBrightnessSmooth(brightness, lightDeltaTime);
             }
-            lights[LEVEL_LIGHT + l].setBrightnessSmooth(brightness, args.sampleTime);
         }
 
 
@@ -252,7 +268,7 @@ struct Btfld : Module {
 
         previousInputSignal = inputSignal;
         previousSteps = steps;
-        setPosNegLight(SAW_INDICATOR_LIGHT, feedback, args.sampleTime);
+        if (updateLights) setPosNegLight(SAW_INDICATOR_LIGHT, feedback, lightDeltaTime);
         outputs[SAW_OUTPUT].setVoltage(feedback);
     }
 };

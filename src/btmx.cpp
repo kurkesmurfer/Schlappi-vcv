@@ -5,7 +5,11 @@
 #include <cmath>
 
 #define UPSAMPLE_RATIO 16
+#ifdef METAMODULE
+#define UPSAMPLE_QUALITY 2
+#else
 #define UPSAMPLE_QUALITY 4
+#endif
 
 struct BTMX : Module {
 	enum ParamId {
@@ -47,6 +51,8 @@ struct BTMX : Module {
     std::array<float, UPSAMPLE_RATIO> workingBuffer;
 
     float gateVoltage;
+    int lightDivider = 0;
+    static constexpr int LIGHT_DIVIDER = 256;
 
     BTMX() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -69,10 +75,10 @@ struct BTMX : Module {
 		configInput(IN_INPUT + 6, "In 7");
 		configInput(IN_INPUT + 7, "In 8");
 		configOutput(STEP_OUTPUT, "Step");
-        configOutput(MIX_OUTPUT + 0, "Mix 1 ★ 5");
-        configOutput(MIX_OUTPUT + 1, "Mix 2 ★ 6");
-        configOutput(MIX_OUTPUT + 2, "Mix 3 ★ 7");
-		configOutput(MIX_OUTPUT + 3, "Mix 4 ★ 8");
+        configOutput(MIX_OUTPUT + 0, "Mix 1+5");
+        configOutput(MIX_OUTPUT + 1, "Mix 2+6");
+        configOutput(MIX_OUTPUT + 2, "Mix 3+7");
+		configOutput(MIX_OUTPUT + 3, "Mix 4+8");
 
         for (auto& trigger : triggers) {
             trigger.reset();
@@ -89,16 +95,31 @@ struct BTMX : Module {
     }
 
 	void process(const ProcessArgs& args) override {
+        const bool updateLights = (++lightDivider >= LIGHT_DIVIDER);
+        if (updateLights) lightDivider = 0;
+        const float lightDeltaTime = args.sampleTime * LIGHT_DIVIDER;
+
         for (int i = 0; i < 8; ++i) {
-            auto inputVoltage = params[SWITCH_PARAM + i].getValue() > 0.5 ?
-                    (inputs[IN_INPUT + i].isConnected() ? inputs[IN_INPUT + i].getVoltage() : 10.f) :
-                    0;
-            upsamplers[i].process(inputVoltage, &workingBuffer[0]);
-            for (int samp = 0; samp < UPSAMPLE_RATIO; ++samp) {
-                triggers[i].process(workingBuffer[samp]);
-                upsampledTriggers[i][samp] = triggers[i].isHigh();
+            bool inputHigh = false;
+            if (params[SWITCH_PARAM + i].getValue() > 0.5f) {
+                if (inputs[IN_INPUT + i].isConnected()) {
+                    upsamplers[i].process(inputs[IN_INPUT + i].getVoltage(), &workingBuffer[0]);
+                    for (int samp = 0; samp < UPSAMPLE_RATIO; ++samp) {
+                        triggers[i].process(workingBuffer[samp]);
+                        upsampledTriggers[i][samp] = triggers[i].isHigh();
+                    }
+                    inputHigh = triggers[i].isHigh();
+                } else {
+                    // Switch on, no cable: normalled to high
+                    upsampledTriggers[i].fill(true);
+                    inputHigh = true;
+                }
+            } else {
+                // Switch off: always low
+                upsampledTriggers[i].fill(false);
+                inputHigh = false;
             }
-            lights[IN_INDICATOR_LIGHT + i].setBrightnessSmooth(triggers[i].isHigh() ? 1.f : 0.f, args.sampleTime);
+            if (updateLights) lights[IN_INDICATOR_LIGHT + i].setBrightnessSmooth(inputHigh ? 1.f : 0.f, lightDeltaTime);
         }
 
         int logicMode =
@@ -141,6 +162,7 @@ struct BTMX : Module {
                 }
             }
         }
+
         for (auto row = 0; row < 4; ++row) {
             mixOuts[row] = decimators[row].process(&upsampledMixOuts[row][0]);
         }
@@ -153,11 +175,11 @@ struct BTMX : Module {
 
         for (auto i = 0; i < 4; ++i) {
             outputs[MIX_OUTPUT + i].setVoltage(mixOuts[i] * gateVoltage);
-            lights[MIX_INDICATOR_LIGHT + i].setBrightnessSmooth(mixOuts[i], args.sampleTime);
+            if (updateLights) lights[MIX_INDICATOR_LIGHT + i].setBrightnessSmooth(mixOuts[i], lightDeltaTime);
         }
 
         outputs[STEP_OUTPUT].setVoltage(stepOut * (10.f / 15.f));
-        lights[STEP_INDICATOR_LIGHT].setBrightnessSmooth(stepOut * (1.f / 15.f), args.sampleTime);
+        if (updateLights) lights[STEP_INDICATOR_LIGHT].setBrightnessSmooth(stepOut * (1.f / 15.f), lightDeltaTime);
     }
 };
 

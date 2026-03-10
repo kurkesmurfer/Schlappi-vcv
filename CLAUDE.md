@@ -190,9 +190,17 @@ via `/opt/homebrew`).
 ### Running the simulator
 ```bash
 cd ~/Development/metamodule/simulator
-./build/simulator --zoom 200 --sdcarddir ~/path/to/test-sdcard
+./build/simulator --zoom 250 --sdcarddir ~/Development/mm-sdcard --audioout 2
 ```
-`--zoom 200` is recommended on Retina displays — the MetaModule screen is small.
+`--zoom 250` is recommended on this machine (Retina). `--audioout 2` selects MacBook Pro Speakers.
+Audio devices on this machine:
+```
+0: BlackHole 16ch
+1: BlackHole 64ch
+2: MacBook Pro Speakers  ← use this
+3: Microsoft Teams Audio
+4: Aggregate Device
+```
 
 ### Testing a plugin in the simulator
 This is the fast iteration loop — much quicker than flash-to-hardware.
@@ -232,7 +240,7 @@ cp ~/Development/Schlappi-vcv/metamodule/metamodule-plugins/SchlappiEngineering.
 
 **Step 5: Run with your test SD card**
 ```bash
-./build/simulator --zoom 200 --sdcarddir ~/Development/mm-sdcard
+./build/simulator --zoom 250 --sdcarddir ~/Development/mm-sdcard --audioout 2
 ```
 
 ### Simulator options reference

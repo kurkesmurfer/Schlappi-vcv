@@ -4,7 +4,11 @@
 
 
 #define NIBBLER_UPSAMPLE_RATIO 16
+#ifdef METAMODULE
+#define NIBBLER_UPSAMPLE_QUALITY 2
+#else
 #define NIBBLER_UPSAMPLE_QUALITY 4
+#endif
 #define NIBBLER_NUM_BITS 4
 
 
@@ -98,7 +102,8 @@ struct Nibbler : Module {
 
     std::array<unsigned char, NIBBLER_UPSAMPLE_RATIO> inputBytes;
 
-    std::array<UpsampledTrigger, NIBBLER_UPSAMPLE_RATIO> gateUTrig;
+    // Only NIBBLER_NUM_BITS (4) gate triggers are needed, not NIBBLER_UPSAMPLE_RATIO (16)
+    std::array<UpsampledTrigger, NIBBLER_NUM_BITS> gateUTrig;
 
     std::array<std::array<float, NIBBLER_UPSAMPLE_RATIO>, NIBBLER_NUM_BITS + 1> upsampledBitOutput;
 
@@ -137,6 +142,8 @@ struct Nibbler : Module {
     float gateVoltage;
 
     NibbleRegister nibbleRegister;
+    int lightDivider = 0;
+    static constexpr int LIGHT_DIVIDER = 256;
 
 	Nibbler() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -183,28 +190,32 @@ struct Nibbler : Module {
         gateVoltage = 10.f / kernelSum;
     }
 
-    void computeInputBytes(const ProcessArgs& args) {
+    void computeInputBytes(bool updateLights, float lightDeltaTime) {
         for (auto& b : inputBytes) { b = 0; }
 
         for (auto b = 0; b < NIBBLER_NUM_BITS; ++b) {
-            gateUTrig[b].process(inputs[gateInputIds[b]].getVoltage());
-
-            for (auto s = 0; s < NIBBLER_UPSAMPLE_RATIO; ++s) {
-                gateUTrig[b].trigger.process(gateUTrig[b].input[s], 0.1f, 1.0f);
-                inputBytes[s] += (gateUTrig[b].trigger.isHigh() ? 1 : 0) << b;
+            if (inputs[gateInputIds[b]].isConnected()) {
+                gateUTrig[b].process(inputs[gateInputIds[b]].getVoltage());
+                for (auto s = 0; s < NIBBLER_UPSAMPLE_RATIO; ++s) {
+                    gateUTrig[b].trigger.process(gateUTrig[b].input[s], 0.1f, 1.0f);
+                    inputBytes[s] += (gateUTrig[b].trigger.isHigh() ? 1 : 0) << b;
+                }
+                if (updateLights) lights[gateLightIds[b]].setBrightnessSmooth(gateUTrig[b].trigger.isHigh(), lightDeltaTime);
+            } else if (updateLights) {
+                lights[gateLightIds[b]].setBrightnessSmooth(0.f, lightDeltaTime);
             }
-
-            lights[gateLightIds[b]].setBrightnessSmooth(gateUTrig[b].trigger.isHigh(), args.sampleTime);
         }
 
-        carryInUTrig.process(inputs[CARRY_IN_INPUT].getVoltage());
-
-        for (auto s = 0; s < NIBBLER_UPSAMPLE_RATIO; ++s) {
-            carryInUTrig.trigger.process(carryInUTrig.input[s], 0.1f, 1.0f);
-            inputBytes[s] += carryInUTrig.trigger.isHigh() ? 1 : 0;
+        if (inputs[CARRY_IN_INPUT].isConnected()) {
+            carryInUTrig.process(inputs[CARRY_IN_INPUT].getVoltage());
+            for (auto s = 0; s < NIBBLER_UPSAMPLE_RATIO; ++s) {
+                carryInUTrig.trigger.process(carryInUTrig.input[s], 0.1f, 1.0f);
+                inputBytes[s] += carryInUTrig.trigger.isHigh() ? 1 : 0;
+            }
+            if (updateLights) lights[CARRY_IN_LIGHT].setBrightnessSmooth(carryInUTrig.trigger.isHigh(), lightDeltaTime);
+        } else if (updateLights) {
+            lights[CARRY_IN_LIGHT].setBrightnessSmooth(0.f, lightDeltaTime);
         }
-
-        lights[CARRY_IN_LIGHT].setBrightnessSmooth(carryInUTrig.trigger.isHigh(), args.sampleTime);
 
         unsigned char add = 0;
 
@@ -217,59 +228,88 @@ struct Nibbler : Module {
             s += add;
         }
 
-        subtractUTrig.process(inputs[SUB_INPUT].getVoltage());
         bool subtractSwitch = (params[SUBTRACT_ADD_PARAM].getValue() > 0.5f);
-        for (auto s = 0; s < NIBBLER_UPSAMPLE_RATIO; ++s) {
-            subtractUTrig.trigger.process(subtractUTrig.input[s], 0.1, 1.f);
-            if (subtractSwitch != (subtractUTrig.trigger.isHigh())) {
-                inputBytes[s] = 16 - (inputBytes[s] & 15);
+        if (inputs[SUB_INPUT].isConnected()) {
+            subtractUTrig.process(inputs[SUB_INPUT].getVoltage());
+            for (auto s = 0; s < NIBBLER_UPSAMPLE_RATIO; ++s) {
+                subtractUTrig.trigger.process(subtractUTrig.input[s], 0.1, 1.f);
+                if (subtractSwitch != subtractUTrig.trigger.isHigh()) {
+                    inputBytes[s] = 16 - (inputBytes[s] & 15);
+                }
             }
+            if (updateLights) lights[SUB_LIGHT].setBrightnessSmooth((subtractSwitch != subtractUTrig.trigger.isHigh()) ? 1.f : 0.f, lightDeltaTime);
+        } else {
+            if (subtractSwitch) {
+                for (auto s = 0; s < NIBBLER_UPSAMPLE_RATIO; ++s) {
+                    inputBytes[s] = 16 - (inputBytes[s] & 15);
+                }
+            }
+            if (updateLights) lights[SUB_LIGHT].setBrightnessSmooth(subtractSwitch ? 1.f : 0.f, lightDeltaTime);
         }
-
-        lights[SUB_LIGHT].setBrightnessSmooth((subtractSwitch != subtractUTrig.trigger.isHigh()) ? 1.f : 0.f, args.sampleTime);
     }
 
 	void process(const ProcessArgs& args) override {
-        computeInputBytes(args);
+        const bool updateLights = (++lightDivider >= LIGHT_DIVIDER);
+        if (updateLights) lightDivider = 0;
+        const float lightDeltaTime = args.sampleTime * LIGHT_DIVIDER;
+
+        computeInputBytes(updateLights, lightDeltaTime);
 
         /* Set accumulator parameters */
-        resetUTrig.process(inputs[RESET_INPUT].getVoltage());
+        const bool resetConnected = inputs[RESET_INPUT].isConnected();
+        if (resetConnected) resetUTrig.process(inputs[RESET_INPUT].getVoltage());
+
         clockUTrig.process(inputs[CLOCK_INPUT].getVoltage());
-        shiftUTrig.process(inputs[SHIFT_INPUT].getVoltage());
+
+        const bool shiftConnected = inputs[SHIFT_INPUT].isConnected();
+        if (shiftConnected) shiftUTrig.process(inputs[SHIFT_INPUT].getVoltage());
+
         shiftDataUTrig.process(
                 inputs[SHIFT_DATA_INPUT].isConnected()
                 ? inputs[SHIFT_DATA_INPUT].getVoltage()
                 : out8);
-        shiftXorUTrig.process(inputs[DATA_XOR_INPUT].getVoltage());
+
+        const bool xorConnected = inputs[DATA_XOR_INPUT].isConnected();
+        if (xorConnected) shiftXorUTrig.process(inputs[DATA_XOR_INPUT].getVoltage());
 
         bool resetButtonDown = params[RESET_PARAM].getValue() > 0.5f;
         /* reset light is only based on the button, not the jack input */
-        lights[RESET_LIGHT].setBrightnessSmooth(resetButtonDown, args.sampleTime);
+        if (updateLights) lights[RESET_LIGHT].setBrightnessSmooth(resetButtonDown, lightDeltaTime);
 
         bool async = (params[ASYNC_SYNC_PARAM].getValue() > 0.5f) || !inputs[CLOCK_INPUT].isConnected();
 
         for (auto s = 0; s < NIBBLER_UPSAMPLE_RATIO; ++s) {
             inputBytes[s] += nibbleRegister.heldValue;
             shiftDataUTrig.trigger.process(shiftDataUTrig.input[s]);
-            shiftXorUTrig.trigger.process(shiftXorUTrig.input[s]);
 
-            auto hiShift = shiftUTrig.trigger.process(shiftUTrig.input[s], 0.1f, 1.f);
+            bool hiXor = false;
+            if (xorConnected) {
+                shiftXorUTrig.trigger.process(shiftXorUTrig.input[s]);
+                hiXor = shiftXorUTrig.trigger.isHigh();
+            }
+
+            bool hiShift = false;
+            if (shiftConnected) {
+                hiShift = shiftUTrig.trigger.process(shiftUTrig.input[s], 0.1f, 1.f);
+            }
             auto hiClock = clockUTrig.trigger.process(clockUTrig.input[s], 0.1f, 1.f);
 
             hiClock = async ? (hiClock || hiShift) : hiClock;
 
             auto s1 = inputs[SHIFT_DATA_INPUT].isConnected() ? shiftDataUTrig.trigger.isHigh() : out8;
-            auto s2 = shiftXorUTrig.trigger.isHigh();
+            auto shiftDataInput = (s1 != hiXor);
 
-            auto shiftDataInput = (s1 != s2);
-
-            resetUTrig.trigger.process(resetUTrig.input[s], 0.1f, 1.f);
+            bool hiReset = false;
+            if (resetConnected) {
+                resetUTrig.trigger.process(resetUTrig.input[s], 0.1f, 1.f);
+                hiReset = resetUTrig.trigger.isHigh();
+            }
 
             nibbleRegister.process(inputBytes[s],
-                                   shiftUTrig.trigger.isHigh(),
+                                   shiftConnected ? shiftUTrig.trigger.isHigh() : false,
                                    shiftDataInput,
                                    hiClock,
-                                   (resetUTrig.trigger.isHigh() || resetButtonDown));
+                                   (hiReset || resetButtonDown));
             if (async) {
                 accumulatorOutBytes[s] = inputBytes[s];
             } else {
@@ -278,10 +318,12 @@ struct Nibbler : Module {
             }
         }
 
-        lights[CLOCK_LIGHT].setBrightnessSmooth(clockUTrig.trigger.isHigh(), args.sampleTime);
-        lights[SHIFT_LIGHT].setBrightnessSmooth(shiftUTrig.trigger.isHigh(), args.sampleTime);
-        lights[SHIFT_DATA_LIGHT].setBrightnessSmooth(inputs[SHIFT_DATA_INPUT].isConnected() ? shiftDataUTrig.trigger.isHigh() : out8, args.sampleTime);
-        lights[DATA_XOR_LIGHT].setBrightnessSmooth(shiftXorUTrig.trigger.isHigh(), args.sampleTime);
+        if (updateLights) {
+            lights[CLOCK_LIGHT].setBrightnessSmooth(clockUTrig.trigger.isHigh(), lightDeltaTime);
+            lights[SHIFT_LIGHT].setBrightnessSmooth(shiftConnected ? shiftUTrig.trigger.isHigh() : 0.f, lightDeltaTime);
+            lights[SHIFT_DATA_LIGHT].setBrightnessSmooth(inputs[SHIFT_DATA_INPUT].isConnected() ? shiftDataUTrig.trigger.isHigh() : out8, lightDeltaTime);
+            lights[DATA_XOR_LIGHT].setBrightnessSmooth(xorConnected ? shiftXorUTrig.trigger.isHigh() : 0.f, lightDeltaTime);
+        }
 
 
 
@@ -292,15 +334,12 @@ struct Nibbler : Module {
                 upsampledBitOutput[b][s] = (outByte & (1 << b)) ? gateVoltage : 0.f;
             }
             auto outVolt = bitOutDecimators[b].process(upsampledBitOutput[b].data());
-            lights[outputLightIds[b]].setBrightnessSmooth(outVolt * 0.1f, args.sampleTime);
+            if (updateLights) lights[outputLightIds[b]].setBrightnessSmooth(outVolt * 0.1f, lightDeltaTime);
             outputs[outputBitIds[b]].setVoltage(outVolt);
             if (b == 3) {
                 out8 = outVolt;
             }
         }
-
-        std::fill(stepDecimatorInput.begin(), stepDecimatorInput.end(), 0);
-        std::fill(offsetStepDecimatorInput.begin(), offsetStepDecimatorInput.end(), 0);
 
         auto s1 = params[OFFSET_1_PARAM].getValue() > 0.5f;
         auto s2 = params[OFFSET_2_PARAM].getValue() > 0.5f;
@@ -323,11 +362,11 @@ struct Nibbler : Module {
 
         auto stepOut = stepDecimator.process(stepDecimatorInput.data());
         outputs[STEP_OUTPUT].setVoltage(stepOut);
-        lights[STEP_LIGHT].setBrightnessSmooth(stepOut * 0.1f, args.sampleTime);
+        if (updateLights) lights[STEP_LIGHT].setBrightnessSmooth(stepOut * 0.1f, lightDeltaTime);
 
         auto offsetStepOut = offsetStepDecimator.process(offsetStepDecimatorInput.data());
         outputs[OFFSET_STEP_OUTPUT].setVoltage(offsetStepOut);
-        lights[OFFSET_STEP_LIGHT].setBrightnessSmooth(offsetStepOut * 0.1f, args.sampleTime);
+        if (updateLights) lights[OFFSET_STEP_LIGHT].setBrightnessSmooth(offsetStepOut * 0.1f, lightDeltaTime);
     }
 };
 
