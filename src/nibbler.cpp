@@ -3,10 +3,11 @@
 #include <array>
 
 
-#define NIBBLER_UPSAMPLE_RATIO 16
 #ifdef METAMODULE
+#define NIBBLER_UPSAMPLE_RATIO 8
 #define NIBBLER_UPSAMPLE_QUALITY 2
 #else
+#define NIBBLER_UPSAMPLE_RATIO 16
 #define NIBBLER_UPSAMPLE_QUALITY 4
 #endif
 #define NIBBLER_NUM_BITS 4
@@ -336,9 +337,7 @@ struct Nibbler : Module {
             auto outVolt = bitOutDecimators[b].process(upsampledBitOutput[b].data());
             if (updateLights) lights[outputLightIds[b]].setBrightnessSmooth(outVolt * 0.1f, lightDeltaTime);
             outputs[outputBitIds[b]].setVoltage(outVolt);
-            if (b == 3) {
-                out8 = outVolt;
-            }
+            if (b == 3) out8 = outVolt;
         }
 
         auto s1 = params[OFFSET_1_PARAM].getValue() > 0.5f;

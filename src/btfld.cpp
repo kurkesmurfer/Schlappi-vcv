@@ -8,7 +8,7 @@
 #define NIBBLE 4
 #define BTFLD_UPSAMPLE_RATE 8
 #ifdef METAMODULE
-#define BTFLD_UPSAMPLE_QUALITY 4
+#define BTFLD_UPSAMPLE_QUALITY 2
 #else
 #define BTFLD_UPSAMPLE_QUALITY 12
 #endif
@@ -192,12 +192,15 @@ struct Btfld : Module {
         if (updateLights) setPosNegLight(CV_INDICATOR_LIGHT, params[CV_PARAM].getValue() * cvInput, lightDeltaTime);
 
 
-        auto inputSignal = inputs[INPUT_INPUT].getVoltage();
+        auto inputSignal = inputs[INPUT_INPUT].isConnected() ? inputs[INPUT_INPUT].getVoltage() : 0.f;
         auto bipolar = params[RANGE_PARAM].getValue() > 0.5f;
         if (updateLights) setPosNegLight(INPUT_INDICATOR_LIGHT, inputSignal, lightDeltaTime);
 
-
-        inputUpsampler.process(inputSignal * upsamplerGain, upsampledInput.data());
+        if (inputs[INPUT_INPUT].isConnected()) {
+            inputUpsampler.process(inputSignal * upsamplerGain, upsampledInput.data());
+        } else {
+            upsampledInput.fill(0.f);
+        }
 
         auto inject = inputs[INJECT_INPUT].getVoltage();
         if (updateLights) setPosNegLight(INJECT_INDICATOR_LIGHT, inject, lightDeltaTime);
