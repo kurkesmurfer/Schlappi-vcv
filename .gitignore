@@ -8,3 +8,6 @@
 .idea
 cmake-build-*
 .aider*
+
+metamodule/build/
+metamodule/metamodule-plugins/
