@@ -29,5 +29,5 @@ official releases**.
   a 10 kHz one-pole LP on SAW and STEP outputs to approximate the analog character
   of the hardware module — the MetaModule version is intentionally close to the
   hardware sound.
-- CPU usage on hardware (isolated patches): BTFLD ~30%, BTMX ~13%, Nibbler ~31%.
+- CPU usage on hardware (isolated patches): BTFLD ~17%, BTMX ~13%, Nibbler ~31%.
 - Feedback and bug reports welcome — please open an issue in this repository.
