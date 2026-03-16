@@ -250,6 +250,9 @@ struct Nibbler : Module {
     }
 
 	void process(const ProcessArgs& args) override {
+#if defined(METAMODULE) && defined(__arm__)
+        { uint32_t fpscr; asm volatile("vmrs %0, fpscr" : "=r"(fpscr)); fpscr |= (1u << 24); asm volatile("vmsr fpscr, %0" : : "r"(fpscr)); }
+#endif
         const bool updateLights = (++lightDivider >= LIGHT_DIVIDER);
         if (updateLights) lightDivider = 0;
         const float lightDeltaTime = args.sampleTime * LIGHT_DIVIDER;

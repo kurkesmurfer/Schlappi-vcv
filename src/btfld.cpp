@@ -1,17 +1,9 @@
 #include "plugin.hpp"
 #include "widgets/schlappi_widgets.hpp"
 #include <cmath>
-#include <math.h>
 #include <array>
-#include <vector>
 
 #define NIBBLE 4
-#define BTFLD_UPSAMPLE_RATE 8
-#ifdef METAMODULE
-#define BTFLD_UPSAMPLE_QUALITY 4
-#else
-#define BTFLD_UPSAMPLE_QUALITY 12
-#endif
 
 struct ACCouplingFilter {
     ACCouplingFilter() : xPrev(0), yPrev(0), scalar(0) {}
@@ -30,39 +22,31 @@ public:
     float xPrev, yPrev, scalar;
 };
 
-struct BitCalculator {
-    int shiftAmount;
-    int delayBeforeGoingHigh = BTFLD_UPSAMPLE_RATE * 1.5f;
-    int counter;
-    int lastOddValue;
+struct OnePoleLP {
+    OnePoleLP() : y(0), alpha(0) {}
 
-    BitCalculator() {
-        counter = 0;
-        lastOddValue = 0;
+    void setCutoff(float fc, float sampleRate) {
+        alpha = std::exp(-2.f * M_PI * fc / sampleRate);
     }
 
-    bool oddTracker(int input) {
-        if ((input % 2) == 0) {
-            counter = 0;
-            return false;
-        }
-
-        if (input != lastOddValue) {
-            lastOddValue = input;
-            counter = 1;
-        } else if (counter < delayBeforeGoingHigh) {
-            ++counter;
-        }
-        return counter >= delayBeforeGoingHigh;
+    float process(float x) {
+        y = (1.f - alpha) * x + alpha * y;
+        return y;
     }
-
-    float process(float input) {
-        if (oddTracker(static_cast<int>(input) >> shiftAmount)) {
-            return static_cast<float>(1.f);
-        }
-        return 0.f;
-    }
+public:
+    float y, alpha;
 };
+
+// Antiderivative of frac(1.6·v) with respect to v.
+// f(v) = frac(1.6v),  F(v) = (r² + n) × 0.3125
+// where s = 1.6v, n = floor(s), r = s - n.
+// F is continuous and piecewise-quadratic across all fold boundaries.
+static inline float adaa_antideriv(float v) {
+    float s = 1.6f * v;
+    float n = floorf(s);
+    float r = s - n;
+    return (r * r + n) * 0.3125f;
+}
 
 struct Btfld : Module {
 	enum ParamId {
@@ -94,34 +78,15 @@ struct Btfld : Module {
 		LIGHTS_LEN
 	};
 
-    float feedback;
-    float previousInputSignal;
-    int previousSteps;
-    std::array<float, NIBBLE> bits;
-    std::array<float, NIBBLE> bitFilter;
-    const int OVERSAMPLING = 512;
+    float feedback = 0.f;
+    float v_prev = 0.f;   // previous saturated input, for ADAA
+    float F_prev = 0.f;   // antiderivative at v_prev
 
     ACCouplingFilter stepFilter;
     ACCouplingFilter sawFilter;
+    OnePoleLP sawLP;
+    OnePoleLP stepLP;
 
-    dsp::Upsampler<BTFLD_UPSAMPLE_RATE, BTFLD_UPSAMPLE_QUALITY> inputUpsampler{0.5f};
-    dsp::Upsampler<BTFLD_UPSAMPLE_RATE, BTFLD_UPSAMPLE_QUALITY> cvUpsampler{0.5f};
-    dsp::Upsampler<BTFLD_UPSAMPLE_RATE, BTFLD_UPSAMPLE_QUALITY> injectUpsampler{0.5f};
-
-    std::array<float, BTFLD_UPSAMPLE_RATE> upsampledInput;
-    std::array<float, BTFLD_UPSAMPLE_RATE> upsampledCV;
-    std::array<float, BTFLD_UPSAMPLE_RATE> upsampledInject;
-    std::array<float, BTFLD_UPSAMPLE_RATE> workingBuffer;
-    std::array<float, BTFLD_UPSAMPLE_RATE> upsampledStepOut;
-    std::array<float, BTFLD_UPSAMPLE_RATE> upsampledSaw;
-
-    std::array<dsp::Decimator<BTFLD_UPSAMPLE_RATE, BTFLD_UPSAMPLE_QUALITY>, 4> downsamplers;
-    dsp::Decimator<BTFLD_UPSAMPLE_RATE, BTFLD_UPSAMPLE_QUALITY> stepDownsampler;
-    dsp::Decimator<BTFLD_UPSAMPLE_RATE, BTFLD_UPSAMPLE_QUALITY> sawDownsampler;
-
-    std::array<BitCalculator, NIBBLE> bitCalculators;
-
-    float upsamplerGain, downsamplerGain;
     int lightDivider = 0;
     static constexpr int LIGHT_DIVIDER = 256;
 
@@ -139,118 +104,81 @@ struct Btfld : Module {
 		configOutput(BIT_OUTPUT + 1, "Out bit 2");
         configOutput(BIT_OUTPUT, "Out bit 1");
         configOutput(STEP_OUT_OUTPUT, "Step");
-
-        std::fill(workingBuffer.begin(), workingBuffer.end(), 0.f);
-
-        feedback = 0; previousSteps = 0; previousInputSignal = 0;
-
-        float kernelSum = 0;
-        for (auto i = 0; i < BTFLD_UPSAMPLE_RATE * BTFLD_UPSAMPLE_QUALITY; ++i) {
-            kernelSum += cvUpsampler.kernel[i];
-        }
-        upsamplerGain = 1.f / kernelSum;
-        kernelSum = 0;
-        for (auto i = 0; i < BTFLD_UPSAMPLE_RATE * BTFLD_UPSAMPLE_QUALITY; ++i) {
-            kernelSum += downsamplers[0].kernel[i];
-        }
-        downsamplerGain = 1.f / kernelSum;
-
-        bitCalculators[0].shiftAmount = 0;
-        bitCalculators[1].shiftAmount = 1;
-        bitCalculators[2].shiftAmount = 2;
-        bitCalculators[3].shiftAmount = 3;
     }
 
     void onSampleRateChange(const SampleRateChangeEvent& e) override {
         stepFilter.setDecay(0.25f * e.sampleRate);
         sawFilter.setDecay(0.25f * e.sampleRate);
-
-        for (auto& b : bits) { b = 0; }
-        for (auto& b : bitFilter) { b = 0; }
-    }
-
-    float saturate(float x) {
-        return std::min(std::max(0.f, x), 11.7f);
+        sawLP.setCutoff(10000.f, e.sampleRate);
+        stepLP.setCutoff(10000.f, e.sampleRate);
     }
 
     void setPosNegLight(int light, float voltage, float sampleTime) {
-        // red is negative, blue is positive
         lights[light + 0].setBrightnessSmooth(std::min(std::max(0.f, -voltage), 5.f) * 0.2f, sampleTime);
         lights[light + 2].setBrightnessSmooth(std::min(std::max(0.f, voltage), 5.f) * 0.2f, sampleTime);
     }
 
     void process(const ProcessArgs& args) override {
+#if defined(METAMODULE) && defined(__arm__)
+        { uint32_t fpscr; asm volatile("vmrs %0, fpscr" : "=r"(fpscr)); fpscr |= (1u << 24); asm volatile("vmsr fpscr, %0" : : "r"(fpscr)); }
+#endif
         const bool updateLights = (++lightDivider >= LIGHT_DIVIDER);
         if (updateLights) lightDivider = 0;
         const float lightDeltaTime = args.sampleTime * LIGHT_DIVIDER;
 
+        // Gain
         auto cvInput = inputs[CV_INPUT].isConnected() ? inputs[CV_INPUT].getVoltage() : feedback;
         auto gain = params[GAIN_PARAM].getValue() + params[CV_PARAM].getValue() * cvInput * 0.1f;
-
-        cvUpsampler.process(gain * upsamplerGain, upsampledCV.data());
-
         if (updateLights) setPosNegLight(CV_INDICATOR_LIGHT, params[CV_PARAM].getValue() * cvInput, lightDeltaTime);
 
-
+        // Input
         auto inputSignal = inputs[INPUT_INPUT].isConnected() ? inputs[INPUT_INPUT].getVoltage() : 0.f;
         auto bipolar = params[RANGE_PARAM].getValue() > 0.5f;
         if (updateLights) setPosNegLight(INPUT_INDICATOR_LIGHT, inputSignal, lightDeltaTime);
 
-        if (inputs[INPUT_INPUT].isConnected()) {
-            inputUpsampler.process(inputSignal * upsamplerGain, upsampledInput.data());
-        } else {
-            upsampledInput.fill(0.f);
-        }
-
-        auto inject = inputs[INJECT_INPUT].getVoltage();
+        // Inject
+        auto inject = inputs[INJECT_INPUT].isConnected() ? inputs[INJECT_INPUT].getVoltage() : 0.f;
         if (updateLights) setPosNegLight(INJECT_INDICATOR_LIGHT, inject, lightDeltaTime);
 
-        if (inputs[INJECT_INPUT].isConnected()) {
-            injectUpsampler.process(inject * upsamplerGain, upsampledInject.data());
+        // Saturated pre-quantizer signal v ∈ [0, 11.7]
+        float v = inputSignal * gain + (bipolar ? 5.f : 0.f) + inject;
+        v = std::min(std::max(0.f, v), 11.7f);
+
+        // ADAA bandlimited sawtooth: average of frac(1.6·v) over [v_prev, v]
+        float F = adaa_antideriv(v);
+        float saw;
+        float dv = v - v_prev;
+        if (std::abs(dv) < 1e-6f) {
+            float s = 1.6f * v;
+            saw = s - floorf(s);  // instantaneous frac(1.6v)
         } else {
-            upsampledInject.fill(0.f);
+            saw = (F - F_prev) / dv;
+        }
+        v_prev = v;
+        F_prev = F;
+
+        // Quantizer: integer step index and bit outputs
+        float scaled = 1.6f * v;
+        int step = static_cast<int>(scaled);
+        if (step > 15) step = 15;
+
+        for (int b = 0; b < NIBBLE; ++b) {
+            float bit = ((step >> b) & 1) ? 1.f : 0.f;
+            outputs[BIT_OUTPUT + b].setVoltage(bit * 10.f - (bipolar ? 5.f : 0.f));
+            if (updateLights) lights[BIT_INDICATOR_LIGHT + b].setBrightnessSmooth(bit, lightDeltaTime);
         }
 
-        for (auto ss = 0; ss < BTFLD_UPSAMPLE_RATE; ++ss) {
-            upsampledInput[ss] *= upsampledCV[ss];
-            upsampledInput[ss] += bipolar ? 5.f : 0.f;
-            upsampledInput[ss] += upsampledInject[ss];
-
-            upsampledInput[ss] = saturate(upsampledInput[ss]);
-
-            upsampledInput[ss] *= (16.f / 10.f);
-
-
-            upsampledStepOut[ss] = std::max(upsampledInput[ss] - 15.99f, 0.f);
-            upsampledInput[ss] = std::min(upsampledInput[ss], 15.99f);
-
-            upsampledStepOut[ss] += std::floor(upsampledInput[ss]);
-            upsampledSaw[ss] = std::min(std::max(0.f, upsampledInput[ss] - upsampledStepOut[ss]), 1.1f);
-        }
-
-
-
-        for (auto b = 0; b < NIBBLE; ++b) {
-            for (int ss = 0; ss < BTFLD_UPSAMPLE_RATE; ++ss) {
-                workingBuffer[ss] = bitCalculators[b].process(upsampledInput[ss]);
-            }
-            bits[b] = downsamplers[b].process(workingBuffer.data()) * downsamplerGain;
-        }
-
-        for (auto i = 0; i < NIBBLE; ++i) {
-            outputs[BIT_OUTPUT + i].setVoltage(bits[i] * 10.f - (bipolar ? 5.f : 0.f));
-            if (updateLights) lights[BIT_INDICATOR_LIGHT + i].setBrightnessSmooth(bits[i], lightDeltaTime);
-        }
-
-        float steps = stepDownsampler.process(upsampledStepOut.data()) * downsamplerGain;
-        float saw = sawDownsampler.process(upsampledSaw.data()) * downsamplerGain;
+        // Step output
+        float steps = static_cast<float>(step);
+        float rescaledSteps = steps * (10.f / 16.f);
+        auto filteredSteps = stepFilter.process(rescaledSteps);
+        auto smoothedSteps = stepLP.process(bipolar ? filteredSteps : rescaledSteps);
+        outputs[STEP_OUT_OUTPUT].setVoltage(smoothedSteps);
 
         if (updateLights) {
             for (int l = 0; l < 8; ++l) {
-                // each light covers 2 steps
                 auto brightness = 0.f;
                 if (bipolar && l < 4) {
-                    // if bipolar, invert the lower half of the lights to have a "measuring from the midpoint" effect
                     brightness += l * 2 > steps ? 0.5f : 0.f;
                     brightness += l * 2 + 1 > steps ? 0.5f : 0.f;
                 } else {
@@ -261,16 +189,12 @@ struct Btfld : Module {
             }
         }
 
-
+        // SAW output: ADAA result ∈ [0,1), scaled to voltage, AC-coupled in bipolar, LP smoothed
         saw *= 10.f;
-        auto rescaledSteps = steps * (10.f / 16.f);
-        auto filteredSteps = stepFilter.process(rescaledSteps);
-        outputs[STEP_OUT_OUTPUT].setVoltage(bipolar ? filteredSteps : rescaledSteps);
         auto filteredSaw = sawFilter.process(saw);
-        feedback = std::min(std::max(-12.f, (bipolar ? filteredSaw : saw)), 12.f);
+        auto smoothedSaw = sawLP.process(bipolar ? filteredSaw : saw);
+        feedback = std::min(std::max(-12.f, smoothedSaw), 12.f);
 
-        previousInputSignal = inputSignal;
-        previousSteps = steps;
         if (updateLights) setPosNegLight(SAW_INDICATOR_LIGHT, feedback, lightDeltaTime);
         outputs[SAW_OUTPUT].setVoltage(feedback);
     }
