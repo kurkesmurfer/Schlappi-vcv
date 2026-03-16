@@ -4,11 +4,29 @@
 #include <array>
 #include <cmath>
 
+#ifndef METAMODULE
 #define UPSAMPLE_RATIO 16
 #ifdef METAMODULE
 #define UPSAMPLE_QUALITY 2
 #else
 #define UPSAMPLE_QUALITY 4
+#endif
+#endif
+
+#ifdef METAMODULE
+struct OnePoleLP {
+    OnePoleLP() : y(0), alpha(0) {}
+
+    void setCutoff(float fc, float sampleRate) {
+        alpha = std::exp(-2.f * M_PI * fc / sampleRate);
+    }
+
+    float process(float x) {
+        y = (1.f - alpha) * x + alpha * y;
+        return y;
+    }
+    float y, alpha;
+};
 #endif
 
 struct BTMX : Module {
@@ -44,13 +62,17 @@ struct BTMX : Module {
     std::array<dsp::SchmittTrigger, 8> triggers;
     std::array<float, 4> mixOuts;
 
+#ifndef METAMODULE
     std::array<dsp::Decimator<UPSAMPLE_RATIO, UPSAMPLE_QUALITY>, 4> decimators;
     std::array<dsp::Upsampler<UPSAMPLE_RATIO, UPSAMPLE_QUALITY>, 8> upsamplers;
     std::array<std::array<bool, UPSAMPLE_RATIO>, 8> upsampledTriggers;
     std::array<std::array<float, UPSAMPLE_RATIO>, 4> upsampledMixOuts;
     std::array<float, UPSAMPLE_RATIO> workingBuffer;
-
     float gateVoltage;
+#else
+    OnePoleLP stepLP;
+#endif
+
     int lightDivider = 0;
     static constexpr int LIGHT_DIVIDER = 256;
 
@@ -84,6 +106,7 @@ struct BTMX : Module {
             trigger.reset();
         }
 
+#ifndef METAMODULE
         std::fill(upsamplers.begin(), upsamplers.end(), 0.2f);
         std::fill(decimators.begin(), decimators.end(), 0.8f);
 
@@ -92,7 +115,14 @@ struct BTMX : Module {
             kernelSum += decimators[0].kernel[i];
         }
         gateVoltage = 10.f / kernelSum;
+#endif
     }
+
+#ifdef METAMODULE
+    void onSampleRateChange(const SampleRateChangeEvent& e) override {
+        stepLP.setCutoff(10000.f, e.sampleRate);
+    }
+#endif
 
 	void process(const ProcessArgs& args) override {
 #if defined(METAMODULE) && defined(__arm__)
@@ -102,8 +132,58 @@ struct BTMX : Module {
         if (updateLights) lightDivider = 0;
         const float lightDeltaTime = args.sampleTime * LIGHT_DIVIDER;
 
+#ifdef METAMODULE
+        // Base-rate path: Schmitt trigger per sample, no oversampling
+        bool inputHigh[8] = {};
         for (int i = 0; i < 8; ++i) {
-            bool inputHigh = false;
+            if (params[SWITCH_PARAM + i].getValue() > 0.5f) {
+                if (inputs[IN_INPUT + i].isConnected()) {
+                    triggers[i].process(inputs[IN_INPUT + i].getVoltage());
+                    inputHigh[i] = triggers[i].isHigh();
+                } else {
+                    inputHigh[i] = true;  // switch on, no cable: normalled high
+                }
+            }
+            if (updateLights) lights[IN_INDICATOR_LIGHT + i].setBrightnessSmooth(inputHigh[i] ? 1.f : 0.f, lightDeltaTime);
+        }
+
+        int logicMode =
+                (params[LOGIC_MODE_A].getValue() > 0.5 ? 2 : 0) +
+                (params[LOGIC_MODE_B].getValue() > 0.5 ? 1 : 0);
+
+        if (logicMode == 0) {           // AND
+            for (int row = 0; row < 4; ++row)
+                mixOuts[row] = (inputHigh[row] && inputHigh[row + 4]) ? 1.f : 0.f;
+        } else if (logicMode == 1) {    // ADD
+            int carry = 0;
+            for (int row = 3; row >= 0; --row) {
+                carry += inputHigh[row] ? 1 : 0;
+                carry += inputHigh[row + 4] ? 1 : 0;
+                mixOuts[row] = (carry & 1) ? 1.f : 0.f;
+                carry >>= 1;
+            }
+        } else if (logicMode == 2) {    // OR
+            for (int row = 0; row < 4; ++row)
+                mixOuts[row] = (inputHigh[row] || inputHigh[row + 4]) ? 1.f : 0.f;
+        } else {                        // XOR
+            for (int row = 0; row < 4; ++row)
+                mixOuts[row] = (inputHigh[row] != inputHigh[row + 4]) ? 1.f : 0.f;
+        }
+
+        auto stepOut = mixOuts[0] * 8 + mixOuts[1] * 4 + mixOuts[2] * 2 + mixOuts[3];
+
+        for (int i = 0; i < 4; ++i) {
+            outputs[MIX_OUTPUT + i].setVoltage(mixOuts[i] * 10.f);
+            if (updateLights) lights[MIX_INDICATOR_LIGHT + i].setBrightnessSmooth(mixOuts[i], lightDeltaTime);
+        }
+
+        outputs[STEP_OUTPUT].setVoltage(stepLP.process(stepOut * (10.f / 15.f)));
+        if (updateLights) lights[STEP_INDICATOR_LIGHT].setBrightnessSmooth(stepOut * (1.f / 15.f), lightDeltaTime);
+
+#else
+        // Oversampled path (VCVRack)
+        for (int i = 0; i < 8; ++i) {
+            bool high = false;
             if (params[SWITCH_PARAM + i].getValue() > 0.5f) {
                 if (inputs[IN_INPUT + i].isConnected()) {
                     upsamplers[i].process(inputs[IN_INPUT + i].getVoltage(), &workingBuffer[0]);
@@ -111,18 +191,15 @@ struct BTMX : Module {
                         triggers[i].process(workingBuffer[samp]);
                         upsampledTriggers[i][samp] = triggers[i].isHigh();
                     }
-                    inputHigh = triggers[i].isHigh();
+                    high = triggers[i].isHigh();
                 } else {
-                    // Switch on, no cable: normalled to high
                     upsampledTriggers[i].fill(true);
-                    inputHigh = true;
+                    high = true;
                 }
             } else {
-                // Switch off: always low
                 upsampledTriggers[i].fill(false);
-                inputHigh = false;
             }
-            if (updateLights) lights[IN_INDICATOR_LIGHT + i].setBrightnessSmooth(inputHigh ? 1.f : 0.f, lightDeltaTime);
+            if (updateLights) lights[IN_INDICATOR_LIGHT + i].setBrightnessSmooth(high ? 1.f : 0.f, lightDeltaTime);
         }
 
         int logicMode =
@@ -130,51 +207,36 @@ struct BTMX : Module {
                 (params[LOGIC_MODE_B].getValue() > 0.5 ? 1 : 0);
 
         if (logicMode == 0) {
-            // AND
-            for (auto row = 0; row < 4; ++row) {
-                for (auto subsample = 0; subsample < UPSAMPLE_RATIO; ++subsample) {
-                    upsampledMixOuts[row][subsample] =
-                            (upsampledTriggers[row][subsample] && upsampledTriggers[row+4][subsample]) ? 1.f : 0.f;
-                }
-            }
+            for (auto row = 0; row < 4; ++row)
+                for (auto ss = 0; ss < UPSAMPLE_RATIO; ++ss)
+                    upsampledMixOuts[row][ss] =
+                            (upsampledTriggers[row][ss] && upsampledTriggers[row+4][ss]) ? 1.f : 0.f;
         } else if (logicMode == 1) {
-            // ADD
-            for (auto subsample = 0; subsample < UPSAMPLE_RATIO; ++subsample) {
+            for (auto ss = 0; ss < UPSAMPLE_RATIO; ++ss) {
                 int carry = 0;
                 for (int row = 3; row >= 0; --row) {
-                    carry += upsampledTriggers[row][subsample] ? 1 : 0;
-                    carry += upsampledTriggers[row+4][subsample] ? 1 : 0;
-                    upsampledMixOuts[row][subsample] = (carry & 1) ? 1.f : 0.f;
+                    carry += upsampledTriggers[row][ss] ? 1 : 0;
+                    carry += upsampledTriggers[row+4][ss] ? 1 : 0;
+                    upsampledMixOuts[row][ss] = (carry & 1) ? 1.f : 0.f;
                     carry >>= 1;
                 }
             }
         } else if (logicMode == 2) {
-            // OR
-            for (auto row = 0; row < 4; ++row) {
-                for (auto subsample = 0; subsample < UPSAMPLE_RATIO; ++subsample) {
-                    upsampledMixOuts[row][subsample] =
-                            (upsampledTriggers[row][subsample] || upsampledTriggers[row + 4][subsample]) ? 1.f : 0.f;
-                }
-            }
-        } else if (logicMode == 3) {
-            // XOR
-            for (auto row = 0; row < 4; ++row) {
-                for (auto subsample = 0; subsample < UPSAMPLE_RATIO; ++subsample) {
-                    upsampledMixOuts[row][subsample] =
-                            (upsampledTriggers[row][subsample] != upsampledTriggers[row + 4][subsample]) ? 1.f : 0.f;
-                }
-            }
+            for (auto row = 0; row < 4; ++row)
+                for (auto ss = 0; ss < UPSAMPLE_RATIO; ++ss)
+                    upsampledMixOuts[row][ss] =
+                            (upsampledTriggers[row][ss] || upsampledTriggers[row+4][ss]) ? 1.f : 0.f;
+        } else {
+            for (auto row = 0; row < 4; ++row)
+                for (auto ss = 0; ss < UPSAMPLE_RATIO; ++ss)
+                    upsampledMixOuts[row][ss] =
+                            (upsampledTriggers[row][ss] != upsampledTriggers[row+4][ss]) ? 1.f : 0.f;
         }
 
-        for (auto row = 0; row < 4; ++row) {
+        for (auto row = 0; row < 4; ++row)
             mixOuts[row] = decimators[row].process(&upsampledMixOuts[row][0]);
-        }
 
-        auto stepOut =
-                mixOuts[0] * 8 +
-                mixOuts[1] * 4 +
-                mixOuts[2] * 2 +
-                mixOuts[3] * 1;
+        auto stepOut = mixOuts[0] * 8 + mixOuts[1] * 4 + mixOuts[2] * 2 + mixOuts[3];
 
         for (auto i = 0; i < 4; ++i) {
             outputs[MIX_OUTPUT + i].setVoltage(mixOuts[i] * gateVoltage);
@@ -183,6 +245,7 @@ struct BTMX : Module {
 
         outputs[STEP_OUTPUT].setVoltage(stepOut * (10.f / 15.f));
         if (updateLights) lights[STEP_INDICATOR_LIGHT].setBrightnessSmooth(stepOut * (1.f / 15.f), lightDeltaTime);
+#endif
     }
 };
 
