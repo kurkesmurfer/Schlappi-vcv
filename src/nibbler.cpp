@@ -1,6 +1,7 @@
 #include "plugin.hpp"
 #include "widgets/schlappi_widgets.hpp"
 #include <array>
+#include <cmath>
 
 
 #ifdef METAMODULE
@@ -13,6 +14,7 @@
 #define NIBBLER_NUM_BITS 4
 
 
+#if !defined(METAMODULE) && !defined(NIBBLER_BASE_RATE)
 struct UpsampledTrigger {
     UpsampledTrigger() : upsampler(0.7f) {}
     std::array<float, NIBBLER_UPSAMPLE_RATIO> input;
@@ -23,6 +25,42 @@ struct UpsampledTrigger {
         upsampler.process(in, input.data());
     }
 };
+#endif
+
+#if defined(METAMODULE) || defined(NIBBLER_BASE_RATE)
+struct BiquadLP {
+    BiquadLP() : s1(0), s2(0), b0(0), b1(0), b2(0), a1(0), a2(0) {}
+    void setCoeffs(float fc, float Q, float fs) {
+        float w0    = 2.f * (float)M_PI * fc / fs;
+        float cw    = std::cos(w0);
+        float alpha = std::sin(w0) / (2.f * Q);
+        float ia0   = 1.f / (1.f + alpha);
+        b0 =  (1.f - cw) * 0.5f * ia0;
+        b1 =  (1.f - cw) * ia0;
+        b2 =  b0;
+        a1 = -2.f * cw * ia0;
+        a2 =  (1.f - alpha) * ia0;
+    }
+    float process(float x) {
+        float y = b0 * x + s1;
+        s1 = b1 * x - a1 * y + s2;
+        s2 = b2 * x - a2 * y;
+        return y;
+    }
+    float s1, s2, b0, b1, b2, a1, a2;
+};
+
+// 4th-order Butterworth LP: two cascaded biquads with the correct Q factors
+// Q1=0.5412, Q2=1.3066 give maximally flat Butterworth response
+struct FourPoleButterworthLP {
+    void setCutoff(float fc, float fs) {
+        stage1.setCoeffs(fc, 0.5412f, fs);
+        stage2.setCoeffs(fc, 1.3066f, fs);
+    }
+    float process(float x) { return stage2.process(stage1.process(x)); }
+    BiquadLP stage1, stage2;
+};
+#endif
 
 struct NibbleRegister {
     unsigned char heldValue;
@@ -99,15 +137,20 @@ struct Nibbler : Module {
 		LIGHTS_LEN
 	};
 
+#if defined(METAMODULE) || defined(NIBBLER_BASE_RATE)
+    dsp::SchmittTrigger clockTrig, resetTrig, shiftTrig, shiftDataTrig, xorTrig;
+    dsp::SchmittTrigger subtractTrig, carryInTrig;
+    std::array<dsp::SchmittTrigger, NIBBLER_NUM_BITS> gateTrig;
+    std::array<FourPoleButterworthLP, NIBBLER_NUM_BITS + 1> bitLP;
+    FourPoleButterworthLP stepLP, offsetStepLP;
+    unsigned char inputByte = 0;
+    unsigned char accumulatorOutByte = 0;
+#else
     std::array<dsp::Decimator<NIBBLER_UPSAMPLE_RATIO, NIBBLER_UPSAMPLE_QUALITY>, NIBBLER_NUM_BITS + 1> bitOutDecimators;
-
     std::array<unsigned char, NIBBLER_UPSAMPLE_RATIO> inputBytes;
-
     // Only NIBBLER_NUM_BITS (4) gate triggers are needed, not NIBBLER_UPSAMPLE_RATIO (16)
     std::array<UpsampledTrigger, NIBBLER_NUM_BITS> gateUTrig;
-
     std::array<std::array<float, NIBBLER_UPSAMPLE_RATIO>, NIBBLER_NUM_BITS + 1> upsampledBitOutput;
-
     UpsampledTrigger carryInUTrig;
     UpsampledTrigger subtractUTrig;
     UpsampledTrigger resetUTrig;
@@ -115,13 +158,13 @@ struct Nibbler : Module {
     UpsampledTrigger shiftUTrig;
     UpsampledTrigger shiftDataUTrig;
     UpsampledTrigger shiftXorUTrig;
-
     std::array<unsigned char, NIBBLER_UPSAMPLE_RATIO> accumulatorOutBytes;
-
     dsp::Decimator<NIBBLER_UPSAMPLE_RATIO, NIBBLER_UPSAMPLE_QUALITY> stepDecimator;
     dsp::Decimator<NIBBLER_UPSAMPLE_RATIO, NIBBLER_UPSAMPLE_QUALITY> offsetStepDecimator;
     std::array<float, NIBBLER_UPSAMPLE_RATIO> stepDecimatorInput;
     std::array<float, NIBBLER_UPSAMPLE_RATIO> offsetStepDecimatorInput;
+    float gateVoltage;
+#endif
 
     const std::array<InputId, NIBBLER_NUM_BITS> gateInputIds {
         GATE_1_INPUT, GATE_2_INPUT, GATE_4_INPUT, GATE_8_INPUT
@@ -140,7 +183,6 @@ struct Nibbler : Module {
     };
 
     float out8;
-    float gateVoltage;
 
     NibbleRegister nibbleRegister;
     int lightDivider = 0;
@@ -178,6 +220,7 @@ struct Nibbler : Module {
 
         out8 = 0;
 
+#if !defined(METAMODULE) && !defined(NIBBLER_BASE_RATE)
         // std::fill(gateUpsamplers.begin(), gateUpsamplers.end(), 0.4f);
         std::fill(bitOutDecimators.begin(), bitOutDecimators.end(), 0.8f);
         std::fill(accumulatorOutBytes.begin(), accumulatorOutBytes.end(), 0);
@@ -189,9 +232,61 @@ struct Nibbler : Module {
             kernelSum += bitOutDecimators[0].kernel[i];
         }
         gateVoltage = 10.f / kernelSum;
+#endif
     }
 
+#if defined(METAMODULE) || defined(NIBBLER_BASE_RATE)
+    void onSampleRateChange(const SampleRateChangeEvent& e) override {
+        float fc = e.sampleRate / 3.f;  // ~16 kHz @ 48 kHz; scales with SR for anti-alias
+        for (auto& f : bitLP) f.setCutoff(fc, e.sampleRate);
+        stepLP.setCutoff(fc, e.sampleRate);
+        offsetStepLP.setCutoff(fc, e.sampleRate);
+    }
+#endif
+
     void computeInputBytes(bool updateLights, float lightDeltaTime) {
+#if defined(METAMODULE) || defined(NIBBLER_BASE_RATE)
+        inputByte = 0;
+
+        for (auto b = 0; b < NIBBLER_NUM_BITS; ++b) {
+            if (inputs[gateInputIds[b]].isConnected()) {
+                gateTrig[b].process(inputs[gateInputIds[b]].getVoltage(), 0.1f, 1.0f);
+                inputByte += (gateTrig[b].isHigh() ? 1 : 0) << b;
+                if (updateLights) lights[gateLightIds[b]].setBrightnessSmooth(gateTrig[b].isHigh(), lightDeltaTime);
+            } else if (updateLights) {
+                lights[gateLightIds[b]].setBrightnessSmooth(0.f, lightDeltaTime);
+            }
+        }
+
+        if (inputs[CARRY_IN_INPUT].isConnected()) {
+            carryInTrig.process(inputs[CARRY_IN_INPUT].getVoltage(), 0.1f, 1.0f);
+            inputByte += carryInTrig.isHigh() ? 1 : 0;
+            if (updateLights) lights[CARRY_IN_LIGHT].setBrightnessSmooth(carryInTrig.isHigh(), lightDeltaTime);
+        } else if (updateLights) {
+            lights[CARRY_IN_LIGHT].setBrightnessSmooth(0.f, lightDeltaTime);
+        }
+
+        unsigned char add = 0;
+        add += (params[ADD_1_PARAM].getValue() > 0.5f) ? 1 : 0;
+        add += (params[ADD_2_PARAM].getValue() > 0.5f) ? 2 : 0;
+        add += (params[ADD_4_PARAM].getValue() > 0.5f) ? 4 : 0;
+        add += (params[ADD_8_PARAM].getValue() > 0.5f) ? 8 : 0;
+        inputByte += add;
+
+        bool subtractSwitch = (params[SUBTRACT_ADD_PARAM].getValue() > 0.5f);
+        if (inputs[SUB_INPUT].isConnected()) {
+            subtractTrig.process(inputs[SUB_INPUT].getVoltage(), 0.1f, 1.f);
+            if (subtractSwitch != subtractTrig.isHigh()) {
+                inputByte = 16 - (inputByte & 15);
+            }
+            if (updateLights) lights[SUB_LIGHT].setBrightnessSmooth((subtractSwitch != subtractTrig.isHigh()) ? 1.f : 0.f, lightDeltaTime);
+        } else {
+            if (subtractSwitch) {
+                inputByte = 16 - (inputByte & 15);
+            }
+            if (updateLights) lights[SUB_LIGHT].setBrightnessSmooth(subtractSwitch ? 1.f : 0.f, lightDeltaTime);
+        }
+#else
         for (auto& b : inputBytes) { b = 0; }
 
         for (auto b = 0; b < NIBBLER_NUM_BITS; ++b) {
@@ -247,6 +342,7 @@ struct Nibbler : Module {
             }
             if (updateLights) lights[SUB_LIGHT].setBrightnessSmooth(subtractSwitch ? 1.f : 0.f, lightDeltaTime);
         }
+#endif
     }
 
 	void process(const ProcessArgs& args) override {
@@ -259,6 +355,95 @@ struct Nibbler : Module {
 
         computeInputBytes(updateLights, lightDeltaTime);
 
+#if defined(METAMODULE) || defined(NIBBLER_BASE_RATE)
+        /* Base-rate path: no upsampling */
+        const bool resetConnected = inputs[RESET_INPUT].isConnected();
+        const bool shiftConnected = inputs[SHIFT_INPUT].isConnected();
+        const bool xorConnected   = inputs[DATA_XOR_INPUT].isConnected();
+
+        bool resetButtonDown = params[RESET_PARAM].getValue() > 0.5f;
+        if (updateLights) lights[RESET_LIGHT].setBrightnessSmooth(resetButtonDown, lightDeltaTime);
+
+        bool async = (params[ASYNC_SYNC_PARAM].getValue() > 0.5f) || !inputs[CLOCK_INPUT].isConnected();
+
+        inputByte += nibbleRegister.heldValue;
+
+        shiftDataTrig.process(
+            inputs[SHIFT_DATA_INPUT].isConnected()
+            ? inputs[SHIFT_DATA_INPUT].getVoltage()
+            : out8);
+
+        bool hiXor = false;
+        if (xorConnected) {
+            xorTrig.process(inputs[DATA_XOR_INPUT].getVoltage(), 0.1f, 1.f);
+            hiXor = xorTrig.isHigh();
+        }
+
+        bool hiShift = false;
+        if (shiftConnected) {
+            hiShift = shiftTrig.process(inputs[SHIFT_INPUT].getVoltage(), 0.1f, 1.f);
+        }
+        bool hiClock = clockTrig.process(inputs[CLOCK_INPUT].getVoltage(), 0.1f, 1.f);
+        hiClock = async ? (hiClock || hiShift) : hiClock;
+
+        // Preserve original float vs bool comparison for XOR when shift data is not connected
+        auto s1 = inputs[SHIFT_DATA_INPUT].isConnected() ? (float)shiftDataTrig.isHigh() : out8;
+        bool shiftDataInput = (s1 != (float)hiXor);
+
+        bool hiReset = false;
+        if (resetConnected) {
+            resetTrig.process(inputs[RESET_INPUT].getVoltage(), 0.1f, 1.f);
+            hiReset = resetTrig.isHigh();
+        }
+
+        nibbleRegister.process(inputByte,
+                               shiftConnected ? shiftTrig.isHigh() : false,
+                               shiftDataInput,
+                               hiClock,
+                               (hiReset || resetButtonDown));
+
+        accumulatorOutByte = async
+            ? inputByte
+            : (nibbleRegister.heldValue | (inputByte & 16));
+
+        if (updateLights) {
+            lights[CLOCK_LIGHT].setBrightnessSmooth(clockTrig.isHigh(), lightDeltaTime);
+            lights[SHIFT_LIGHT].setBrightnessSmooth(shiftConnected ? shiftTrig.isHigh() : 0.f, lightDeltaTime);
+            lights[SHIFT_DATA_LIGHT].setBrightnessSmooth(inputs[SHIFT_DATA_INPUT].isConnected() ? (float)shiftDataTrig.isHigh() : out8 * 0.1f, lightDeltaTime);
+            lights[DATA_XOR_LIGHT].setBrightnessSmooth(xorConnected ? xorTrig.isHigh() : 0.f, lightDeltaTime);
+        }
+
+        // Bit outputs — 4-pole Butterworth anti-alias filter
+        unsigned char outByte = async ? inputByte : accumulatorOutByte;
+        for (auto b = 0; b < NIBBLER_NUM_BITS + 1; ++b) {
+            float raw = (outByte & (1 << b)) ? 10.f : 0.f;
+            if (b == 3) out8 = raw;  // pre-filter for logic feedback
+            float outVolt = bitLP[b].process(raw);
+            if (updateLights) lights[outputLightIds[b]].setBrightnessSmooth(outVolt * 0.1f, lightDeltaTime);
+            outputs[outputBitIds[b]].setVoltage(outVolt);
+        }
+
+        // Step outputs — 4-pole Butterworth LP smoothing
+        auto s1p = params[OFFSET_1_PARAM].getValue() > 0.5f;
+        auto s2p = params[OFFSET_2_PARAM].getValue() > 0.5f;
+        unsigned char stepOffset = 0;
+        if      ( s1p && !s2p) stepOffset = 4;
+        else if (!s1p &&  s2p) stepOffset = 2;
+        else if ( s1p &&  s2p) stepOffset = 8;
+
+        float stepRaw       = static_cast<float>(outByte & 15) * (10.f / 15.f);
+        float offsetStepRaw = static_cast<float>((outByte + stepOffset) & 15) * (10.f / 15.f);
+
+        float stepOut = stepLP.process(stepRaw);
+        outputs[STEP_OUTPUT].setVoltage(stepOut);
+        if (updateLights) lights[STEP_LIGHT].setBrightnessSmooth(stepOut * 0.1f, lightDeltaTime);
+
+        float offsetStepOut = offsetStepLP.process(offsetStepRaw);
+        outputs[OFFSET_STEP_OUTPUT].setVoltage(offsetStepOut);
+        if (updateLights) lights[OFFSET_STEP_LIGHT].setBrightnessSmooth(offsetStepOut * 0.1f, lightDeltaTime);
+
+#else
+        /* Oversampled path (VCVRack) */
         /* Set accumulator parameters */
         const bool resetConnected = inputs[RESET_INPUT].isConnected();
         if (resetConnected) resetUTrig.process(inputs[RESET_INPUT].getVoltage());
@@ -329,9 +514,6 @@ struct Nibbler : Module {
             lights[DATA_XOR_LIGHT].setBrightnessSmooth(xorConnected ? shiftXorUTrig.trigger.isHigh() : 0.f, lightDeltaTime);
         }
 
-
-
-
         for (auto b = 0; b < NIBBLER_NUM_BITS + 1; ++b) {
             for (auto s = 0; s < NIBBLER_UPSAMPLE_RATIO; ++s) {
                 auto outByte = async ? inputBytes[s] : accumulatorOutBytes[s];
@@ -369,6 +551,7 @@ struct Nibbler : Module {
         auto offsetStepOut = offsetStepDecimator.process(offsetStepDecimatorInput.data());
         outputs[OFFSET_STEP_OUTPUT].setVoltage(offsetStepOut);
         if (updateLights) lights[OFFSET_STEP_LIGHT].setBrightnessSmooth(offsetStepOut * 0.1f, lightDeltaTime);
+#endif
     }
 };
 
