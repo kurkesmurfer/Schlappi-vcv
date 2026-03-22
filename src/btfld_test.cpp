@@ -218,11 +218,7 @@ struct BtfldTest : Module {
 struct BtfldTestWidget : ModuleWidget {
     BtfldTestWidget(BtfldTest* module) {
         setModule(module);
-        // Plain panel — test tool only
-        box.size = Vec(8 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT);
-        auto* panel = new rack::app::SvgPanel;
-        panel->box.size = box.size;
-        addChild(panel);
+        setPanel(createPanel(asset::plugin(pluginInstance, "res/btfld.svg")));
 
         // Screws
         addChild(createWidget<ThemedScrew>(Vec(RACK_GRID_WIDTH, 0)));

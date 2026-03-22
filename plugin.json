@@ -37,6 +37,15 @@
       ]
     },
     {
+      "slug": "BTFLDtest",
+      "name": "BTFLDtest",
+      "description": "BTFLD quality comparison tool (VCVRack only). Switch between 5 oversampling quality levels at runtime.",
+      "tags": [
+        "Distortion",
+        "Waveshaper"
+      ]
+    },
+    {
       "slug": "Nibbler",
       "name": "Nibbler",
       "modularGridUrl" : "https://modulargrid.net/e/schlappi-engineering-nibbler",
