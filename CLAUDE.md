@@ -178,6 +178,11 @@ arm-none-eabi-gcc --version
 
 ## Simulator
 
+> **Before rebuilding the simulator**, read `~/Development/metamodule/CLAUDE.md`.
+> A parallel Claude Code session (SignalFunctionSet port) maintains that file with
+> up-to-date notes on `ext-plugins.cmake`, registered external plugins, and any
+> known cmake issues affecting the shared simulator build.
+
 The firmware simulator runs the actual MetaModule firmware natively on macOS using SDL2
 for graphics and audio. **Confirmed working** on this machine (Apple Silicon, SDL2 2.32.10
 via `/opt/homebrew`).
