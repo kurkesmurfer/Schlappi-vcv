@@ -62,6 +62,8 @@ create_plugin(
 )
 
 # Rename output file to include version — internal archive dir stays SchlappiEngineering/ to match slug
+# Guard: simulator SDK's plugin.cmake does not create a 'plugin' target
+if(TARGET plugin)
 add_custom_command(TARGET plugin POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rename
                 ${INSTALL_DIR}/SchlappiEngineering.mmplugin
@@ -69,3 +71,4 @@ add_custom_command(TARGET plugin POST_BUILD
         COMMENT "Versioning plugin: SchlappiEngineering-v${_plugin_version}.mmplugin"
         VERBATIM
 )
+endif()
