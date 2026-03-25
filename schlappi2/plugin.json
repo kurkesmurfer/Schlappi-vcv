@@ -1,0 +1,29 @@
+{
+  "slug": "Schlappi2",
+  "name": "Schlappi2",
+  "version": "2.0.0",
+  "license": "GPL-3.0-or-later",
+  "brand": "Schlappi2",
+  "author": "Eric Schlappi, Arden Butterfield",
+  "authorUrl": "https://schlappiengineering.com/",
+  "modules": [
+    {
+      "slug": "BTFLD",
+      "name": "BTFLD",
+      "description": "BTFLD (Bit Fold) — MetaModule-optimised build for side-by-side comparison.",
+      "tags": ["Distortion", "Waveshaper", "Logic"]
+    },
+    {
+      "slug": "BTMX",
+      "name": "BTMX",
+      "description": "BTMX (BitMix) — MetaModule-optimised build for side-by-side comparison.",
+      "tags": ["Logic"]
+    },
+    {
+      "slug": "Nibbler",
+      "name": "Nibbler",
+      "description": "Nibbler — MetaModule-optimised build for side-by-side comparison.",
+      "tags": ["Clock modulator", "Logic"]
+    }
+  ]
+}
