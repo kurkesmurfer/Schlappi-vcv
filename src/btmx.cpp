@@ -4,16 +4,12 @@
 #include <array>
 #include <cmath>
 
-#ifndef METAMODULE
+#if !defined(METAMODULE) && !defined(BTMX_BASE_RATE)
 #define UPSAMPLE_RATIO 16
-#ifdef METAMODULE
-#define UPSAMPLE_QUALITY 2
-#else
 #define UPSAMPLE_QUALITY 4
 #endif
-#endif
 
-#ifdef METAMODULE
+#if defined(METAMODULE) || defined(BTMX_BASE_RATE)
 struct OnePoleLP {
     OnePoleLP() : y(0), alpha(0) {}
 
@@ -62,7 +58,7 @@ struct BTMX : Module {
     std::array<dsp::SchmittTrigger, 8> triggers;
     std::array<float, 4> mixOuts;
 
-#ifndef METAMODULE
+#if !defined(METAMODULE) && !defined(BTMX_BASE_RATE)
     std::array<dsp::Decimator<UPSAMPLE_RATIO, UPSAMPLE_QUALITY>, 4> decimators;
     std::array<dsp::Upsampler<UPSAMPLE_RATIO, UPSAMPLE_QUALITY>, 8> upsamplers;
     std::array<std::array<bool, UPSAMPLE_RATIO>, 8> upsampledTriggers;
@@ -106,7 +102,7 @@ struct BTMX : Module {
             trigger.reset();
         }
 
-#ifndef METAMODULE
+#if !defined(METAMODULE) && !defined(BTMX_BASE_RATE)
         std::fill(upsamplers.begin(), upsamplers.end(), 0.2f);
         std::fill(decimators.begin(), decimators.end(), 0.8f);
 
@@ -118,7 +114,7 @@ struct BTMX : Module {
 #endif
     }
 
-#ifdef METAMODULE
+#if defined(METAMODULE) || defined(BTMX_BASE_RATE)
     void onSampleRateChange(const SampleRateChangeEvent& e) override {
         stepLP.setCutoff(10000.f, e.sampleRate);
     }
@@ -132,7 +128,7 @@ struct BTMX : Module {
         if (updateLights) lightDivider = 0;
         const float lightDeltaTime = args.sampleTime * LIGHT_DIVIDER;
 
-#ifdef METAMODULE
+#if defined(METAMODULE) || defined(BTMX_BASE_RATE)
         // Base-rate path: Schmitt trigger per sample, no oversampling
         bool inputHigh[8] = {};
         for (int i = 0; i < 8; ++i) {
