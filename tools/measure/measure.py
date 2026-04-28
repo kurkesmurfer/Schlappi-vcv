@@ -66,7 +66,7 @@ def generate_playback(n_out_channels: int) -> np.ndarray:
 
 # ── Analysis ──────────────────────────────────────────────────────────────────
 
-def analyze_channel(signal: np.ndarray) -> dict:
+def analyze_channel(signal: np.ndarray, fundamental: float = FUNDAMENTAL) -> dict:
     """
     Returns dict with thd_db, sfdr_db, noise_floor_db, fund_amp,
     harmonic_amps, spectrum, freqs.
@@ -78,7 +78,7 @@ def analyze_channel(signal: np.ndarray) -> dict:
     freqs = fft.rfftfreq(n, 1.0 / SAMPLE_RATE)
 
     # Locate fundamental (search ±BIN_GUARD bins around expected bin)
-    fund_bin_est = np.argmin(np.abs(freqs - FUNDAMENTAL))
+    fund_bin_est = np.argmin(np.abs(freqs - fundamental))
     lo = max(0, fund_bin_est - BIN_GUARD)
     hi = min(len(spectrum), fund_bin_est + BIN_GUARD + 1)
     fund_bin = lo + int(np.argmax(spectrum[lo:hi]))
@@ -87,7 +87,7 @@ def analyze_channel(signal: np.ndarray) -> dict:
     # Harmonic amplitudes 2f..10f
     harmonic_amps = []
     for h in range(2, 2 + N_HARMONICS):
-        hf = FUNDAMENTAL * h
+        hf = fundamental * h
         if hf >= freqs[-1]:
             break
         hbin = np.argmin(np.abs(freqs - hf))
@@ -101,7 +101,7 @@ def analyze_channel(signal: np.ndarray) -> dict:
     # Build mask: DC region + fundamental + all harmonics ±BIN_GUARD bins
     mask = freqs < 20.0
     for h in range(1, 2 + N_HARMONICS):
-        hf = FUNDAMENTAL * h
+        hf = fundamental * h
         if hf >= freqs[-1]:
             break
         hbin = np.argmin(np.abs(freqs - hf))
