@@ -67,6 +67,12 @@ Pre-built binaries are in [`mmplugin/`](mmplugin/).
 > `.mmplugin` files it finds and will conflict if two versions of the same plugin
 > are present.
 
+### Firmware compatibility
+
+The binaries in `mmplugin/` are compiled against **MetaModule Plugin SDK `api-v2.1.0`**.
+They require MetaModule firmware built on SDK v2.1.x. Firmware based on SDK v2.0.x
+(pre-2.1 releases) is not supported.
+
 ---
 
 ## Technical Implementation — MetaModule DSP
