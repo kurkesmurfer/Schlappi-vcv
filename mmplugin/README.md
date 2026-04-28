@@ -21,7 +21,14 @@ official releases**.
 | **BTMX** | BitMix — 4-channel logic mixer (AND / ADD / OR / XOR) with binary-weighted CV output |
 | **Nibbler** | 4-bit binary accumulator / counter with individual bit I/O and stepped DAC output |
 
-## Prototype status
+## Binaries
+
+| Version | Notes |
+|---------|-------|
+| v2.0.22 | Current build — BTFLD ADAA + LP, BTMX base-rate Schmitt triggers, Nibbler 8× OS. **Pending hardware validation.** |
+| v2.0.13 | Last hardware-validated build |
+
+## Status
 
 - These builds target the MetaModule hardware (STM32MP157, Cortex-A7).
 - DSP has been verified in the MetaModule simulator and on hardware.
