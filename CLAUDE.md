@@ -1,3 +1,18 @@
+## On receiving a Discord message
+
+When input starts with `[discord:<channel_id>:<message_id>]`, strip the prefix,
+process the remaining text normally, then reply using **exactly this tool**:
+
+```
+mcp__plugin_discord_discord__reply(chat_id=<channel_id>, text=<your response>)
+```
+
+⚠️ Use ONLY `mcp__plugin_discord_discord__reply` — the custom claude-infra plugin.
+Do NOT use `mcp__claude_ai_Discord__*` or any other official Discord integration.
+Terminal input without a `[discord:...]` prefix is processed unchanged — no Discord reply.
+
+---
+
 # Schlappi Engineering — MetaModule Port
 ## Project Overview
 
